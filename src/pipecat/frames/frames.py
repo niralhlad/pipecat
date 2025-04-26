@@ -653,6 +653,7 @@ class FunctionCallInProgressFrame(SystemFrame):
     tool_call_id: str
     arguments: Any
     cancel_on_interruption: bool = False
+    run_concurrently: bool = False
 
 
 @dataclass
@@ -679,6 +680,7 @@ class FunctionCallResultFrame(SystemFrame):
     tool_call_id: str
     arguments: Any
     result: Any
+    run_llm: Optional[bool] = None
     properties: Optional[FunctionCallResultProperties] = None
 
 

@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Function calls are now ran sequentially. They keep running in tasks, but they
+  will be executed in the order received in the completion. A new LLM completion
+  will run when the last function call finishes running. It is still possible to
+  run a function call concurrently by setting `run_concurrently=True` when
+  registering the function call.
+
 - Function calls now receive a single parameter `FunctionCallParams` instead of
   `(function_name, tool_call_id, args, llm, context, result_callback)` which is
   now deprecated.

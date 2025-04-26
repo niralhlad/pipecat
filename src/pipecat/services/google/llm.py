@@ -552,6 +552,14 @@ class GoogleLLMService(LLMService):
                 prompt_tokens = response.usage_metadata.prompt_token_count
                 total_tokens = prompt_tokens
 
+            total_func_calls = 0
+            async for chunk in response:
+                if chunk.usage_metadata:
+                    for c in chunk.parts:
+                        if c.function_call:
+                            total_func_calls += 1
+
+            current_func_call = 0
             async for chunk in response:
                 if chunk.usage_metadata:
                     # Use only the completion_tokens from the chunks. Prompt tokens are already counted and
@@ -565,13 +573,16 @@ class GoogleLLMService(LLMService):
                             await self.push_frame(LLMTextFrame(c.text))
                         elif c.function_call:
                             logger.debug(f"Function call: {c.function_call}")
+                            run_llm = current_func_call == total_func_calls - 1
                             args = type(c.function_call).to_dict(c.function_call).get("args", {})
                             await self.call_function(
                                 context=context,
                                 tool_call_id=str(uuid.uuid4()),
                                 function_name=c.function_call.name,
                                 arguments=args,
+                                run_llm=run_llm,
                             )
+                            current_func_call += 1
                     # Handle grounding metadata
                     # It seems only the last chunk that we receive may contain this information
                     # If the response doesn't include groundingMetadata, this means the response wasn't grounded.
