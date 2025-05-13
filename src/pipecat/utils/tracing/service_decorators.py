@@ -81,22 +81,20 @@ def _add_token_usage_to_span(span, token_usage):
         span.set_attribute("llm.completion_tokens", getattr(token_usage, "completion_tokens", 0))
 
 
-def _generate_default_span_name(self, service_type):
+def _generate_default_span_name(self, service_class_name, service_type):
     """Generate a default span name using service type and class name.
 
     Args:
         self: The service instance.
+        service_class_name: The class name of the service instance.
         service_type: The service type (e.g., 'llm', 'stt', 'tts').
 
     Returns:
         A default span name string like "type_classname".
     """
-    # Get the full class name in lowercase
-    class_name = self.__class__.__name__.lower()
-
     # Return a name in the format "type_classname"
     # Examples: "llm_openaillmservice", "stt_deepgramsttservice", "tts_cartesiattservice"
-    return f"{service_type}_{class_name}"
+    return f"{service_type}_{service_class_name.lower()}"
 
 
 def traced_tts(func: Optional[Callable] = None, *, name: Optional[str] = None) -> Callable:
@@ -134,9 +132,10 @@ def traced_tts(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                     return
 
                 # Generate a default name if none provided
+                service_class_name = self.__class__.__name__
                 span_name = name
                 if span_name is None:
-                    span_name = _generate_default_span_name(self, "tts")
+                    span_name = _generate_default_span_name(self, service_class_name, "tts")
 
                 # Get the turn context first, then fall back to service context
                 turn_context = get_current_turn_context()
@@ -148,13 +147,9 @@ def traced_tts(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                     span_name, context=parent_context
                 ) as current_span:
                     try:
-                        # Immediately add attributes to the span
-                        service_name = self.__class__.__name__.replace("TTSService", "").lower()
-
-                        # Add TTS attributes right away
                         add_tts_span_attributes(
                             span=current_span,
-                            service_name=service_name,
+                            service_name=service_class_name,
                             model=getattr(self, "model_name", "unknown"),
                             voice_id=getattr(self, "_voice_id", "unknown"),
                             text=text,
@@ -189,8 +184,9 @@ def traced_tts(func: Optional[Callable] = None, *, name: Optional[str] = None) -
 
                 # Generate a default name if none provided
                 span_name = name
+                service_class_name = self.__class__.__name__
                 if span_name is None:
-                    span_name = _generate_default_span_name(self, "tts")
+                    span_name = _generate_default_span_name(self, service_class_name, "tts")
 
                 # Get the parent context - turn context if available, otherwise service context
                 turn_context = get_current_turn_context()
@@ -202,13 +198,9 @@ def traced_tts(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                     span_name, context=parent_context
                 ) as current_span:
                     try:
-                        # Immediately add attributes to the span
-                        service_name = self.__class__.__name__.replace("TTSService", "").lower()
-
-                        # Add TTS attributes right away
                         add_tts_span_attributes(
                             span=current_span,
-                            service_name=service_name,
+                            service_name=service_class_name,
                             model=getattr(self, "model_name", "unknown"),
                             voice_id=getattr(self, "_voice_id", "unknown"),
                             text=text,
@@ -265,8 +257,9 @@ def traced_stt(func: Optional[Callable] = None, *, name: Optional[str] = None) -
 
             # Generate a default name if none provided
             span_name = name
+            service_class_name = self.__class__.__name__
             if span_name is None:
-                span_name = _generate_default_span_name(self, "stt")
+                span_name = _generate_default_span_name(self, service_class_name, "stt")
 
             # Get the turn context first, then fall back to service context
             turn_context = get_current_turn_context()
@@ -276,19 +269,15 @@ def traced_stt(func: Optional[Callable] = None, *, name: Optional[str] = None) -
             tracer = trace.get_tracer("pipecat")
             with tracer.start_as_current_span(span_name, context=parent_context) as current_span:
                 try:
-                    # Get service name from class name
-                    service_name = self.__class__.__name__.replace("STTService", "").lower()
-
                     # Get TTFB metric if available
                     ttfb_ms = getattr(getattr(self, "_metrics", None), "ttfb_ms", None)
 
                     # Use settings from the service if available
                     settings = getattr(self, "_settings", {})
 
-                    # Add all STT attributes immediately
                     add_stt_span_attributes(
                         span=current_span,
-                        service_name=service_name,
+                        service_name=service_class_name,
                         model=getattr(self, "model_name", settings.get("model", "unknown")),
                         transcript=transcript,
                         is_final=is_final,
@@ -340,8 +329,9 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
 
             # Generate a default name if none provided
             span_name = name
+            service_class_name = self.__class__.__name__
             if span_name is None:
-                span_name = _generate_default_span_name(self, "llm")
+                span_name = _generate_default_span_name(self, service_class_name, "llm")
 
             # Get the parent context - turn context if available, otherwise service context
             turn_context = get_current_turn_context()
@@ -368,12 +358,9 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                         # Replace the method temporarily
                         self.start_llm_usage_metrics = wrapped_start_llm_usage_metrics
 
-                    # Add basic attributes immediately
-                    service_name = self.__class__.__name__.replace("LLMService", "").lower()
-
                     try:
                         # Detect if we're using Google's service
-                        is_google_service = "google" in service_name.lower()
+                        is_google_service = "google" in service_class_name.lower()
 
                         # Try to get messages based on service type
                         messages = None
@@ -447,7 +434,7 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
 
                         # Add all available attributes to the span
                         attribute_kwargs = {
-                            "service_name": service_name,
+                            "service_name": service_class_name,
                             "model": getattr(self, "model_name", "unknown"),
                             "stream": True,  # Most LLM services use streaming
                             "parameters": params,
