@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 
 from call_connection_manager import CallConfigManager, SessionManager
 from dotenv import load_dotenv
@@ -26,6 +27,8 @@ from pipecat.services.llm_service import FunctionCallParams
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.services.daily import DailyDialinSettings, DailyParams, DailyTransport
 
+from pipecat.frames.frames import LLMMessagesFrame
+
 load_dotenv(override=True)
 
 logger.remove(0)
@@ -34,6 +37,20 @@ logger.add(sys.stderr, level="DEBUG")
 daily_api_key = os.getenv("DAILY_API_KEY", "")
 daily_api_url = os.getenv("DAILY_API_URL", "https://api.daily.co/v1")
 
+# --------- CALL SUMMARY LOGGING ---------
+def _log_call_summary(start_ts: float,
+                      end_ts: float,
+                      reprompts: int,
+                      silent_events: int,
+                      utterances: int):
+    duration = end_ts - start_ts
+
+    logger.info("--------- CALL SUMMARY ----------------")
+    logger.info(f"  • Duration        : {duration:.1f}s")
+    logger.info(f"  • User messages   : {utterances}")
+    logger.info(f"  • Reprompts sent  : {reprompts}")
+    logger.info(f"  • Silence events  : {silent_events}")
+    logger.info("--------- END CALL SUMMARY ------------")
 
 async def main(
     room_url: str,
@@ -137,6 +154,61 @@ async def main(
     context = OpenAILLMContext(messages, tools)
     context_aggregator = llm.create_context_aggregator(context)
 
+
+    #-----------------------------------------------------------
+    # *********** SILENCE WATCHER AND REPROMPT SETUP ***********
+    #-----------------------------------------------------------
+
+    # ------------- SETUP SILENCE WATCHER -------------
+    silence_timeout = call_config_manager.body.get("simple_dialin", {}).get("silenceTimeout", 10)
+    max_silence_prompts = call_config_manager.body.get("simple_dialin", {}).get("maxSilencePrompts", 3)
+    last_speech_ts = time.time()   # updated whenever user speaks
+    silence_count = 0              # how many times we have reprompted
+    monitor_task = None            # task for monitoring silence
+    call_start_ts = time.time()    # when the call started
+    utterance_count = 0            # how many utterances we have heard
+    silent_events   = 0            # how many times we have been silent
+
+    # ------------- SILENCE MONITOR FUNCTION -------------
+    async def silence_monitor():
+        nonlocal last_speech_ts, silence_count, silent_events
+
+        logger.debug("[SilenceMonitor] starting monitor loop")
+
+        # Continuously check for silence until we break out
+        while True:
+            # wait one second between checks to avoid busy-looping
+            await asyncio.sleep(1)
+
+            # calculate how long it’s been since we last heard speech
+            elapsed = time.time() - last_speech_ts
+            logger.debug(f"[SilenceMonitor] elapsed={elapsed:.1f}s, count={silence_count}")
+
+            # if the silence has gone past our threshold...
+            if elapsed >= silence_timeout:
+                silent_events += 1
+                if silence_count < max_silence_prompts:
+                    # bump the reprompt counter
+                    silence_count += 1
+                    logger.info(f"[SilenceMonitor] {elapsed:.1f}s silence → reprompt #{silence_count}")
+                    messages = [
+                        {"role": "assistant",
+                        "content": "I did not hear you. Could you please repeat that?"}
+                    ]
+                    await task.queue_frames([LLMMessagesFrame(messages)])
+
+                    # reset the last-heard timestamp so we wait full timeout again
+                    last_speech_ts = time.time()
+
+                else:
+                    # enqueue an EndTaskFrame to signal call termination and cancel the task
+                    logger.info(f"[SilenceMonitor] max prompts reached → final hangup")
+                    await task.queue_frames([EndTaskFrame()])
+                    await task.cancel()
+                    break
+
+        logger.debug("[SilenceMonitor] exiting monitor loop")
+
     # ------------ PIPELINE SETUP ------------
 
     # Build pipeline
@@ -162,10 +234,24 @@ async def main(
         await transport.capture_participant_transcription(participant["id"])
         await task.queue_frames([context_aggregator.user().get_context_frame()])
 
+        # Start the silence monitor if it’s not already running
+        nonlocal monitor_task, last_speech_ts, silence_count
+        last_speech_ts = time.time()
+        silence_count = 0
+        if monitor_task is None or monitor_task.done():
+            monitor_task = asyncio.create_task(silence_monitor())
+
     @transport.event_handler("on_participant_left")
     async def on_participant_left(transport, participant, reason):
         logger.debug(f"Participant left: {participant}, reason: {reason}")
         await task.cancel()
+
+    @transport.event_handler("on_transcription_message")
+    async def on_transcription_message(transport, payload: dict):
+        if payload.get("text"):
+            nonlocal last_speech_ts, utterance_count
+            last_speech_ts = time.time()
+            utterance_count += 1
 
     # ------------ RUN PIPELINE ------------
 
@@ -175,6 +261,18 @@ async def main(
     runner = PipelineRunner()
     await runner.run(task)
 
+    # Log the call summary
+    _log_call_summary(
+        start_ts      = call_start_ts,
+        end_ts        = time.time(),
+        reprompts     = silence_count,
+        silent_events = silent_events,
+        utterances    = utterance_count,
+    )
+
+    # once the call ends, cancel our monitor
+    if monitor_task:
+        monitor_task.cancel()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Simple Dial-in Bot")
